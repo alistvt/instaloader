@@ -4,7 +4,8 @@ import re
 from base64 import b64decode, b64encode
 from collections import namedtuple
 from datetime import datetime
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from . import __version__
 from .exceptions import *
@@ -34,8 +35,8 @@ PostLocation.id.__doc__ = "ID number of location."
 PostLocation.name.__doc__ = "Location name."
 PostLocation.slug.__doc__ = "URL friendly variant of location name."
 PostLocation.has_public_page.__doc__ = "Whether location has a public page."
-PostLocation.lat.__doc__ = "Latitude (:class:`float`)."
-PostLocation.lng.__doc__ = "Longitude (:class:`float`)."
+PostLocation.lat.__doc__ = "Latitude (:class:`float` or None)."
+PostLocation.lng.__doc__ = "Longitude (:class:`float` or None)."
 
 
 class Post:
@@ -168,6 +169,8 @@ class Post:
 
     @property
     def _iphone_struct(self) -> Dict[str, Any]:
+        if not self._context.iphone_support:
+            raise IPhoneSupportDisabledException("iPhone support is disabled.")
         if not self._context.is_logged_in:
             raise LoginRequiredException("--login required to access iPhone media info endpoint.")
         if not self._iphone_struct_:
@@ -246,7 +249,7 @@ class Post:
     @property
     def url(self) -> str:
         """URL of the picture / video thumbnail of the post"""
-        if self.typename == "GraphImage" and self._context.is_logged_in:
+        if self.typename == "GraphImage" and self._context.iphone_support and self._context.is_logged_in:
             try:
                 orig_url = self._iphone_struct['image_versions2']['candidates'][0]['url']
                 url = re.sub(r'([?&])se=\d+&?', r'\1', orig_url).rstrip('&')
@@ -304,7 +307,7 @@ class Post:
                     node = edge['node']
                     is_video = node['is_video']
                     display_url = node['display_url']
-                    if not is_video and self._context.is_logged_in:
+                    if not is_video and self._context.iphone_support and self._context.is_logged_in:
                         try:
                             carousel_media = self._iphone_struct['carousel_media']
                             orig_url = carousel_media[idx]['image_versions2']['candidates'][0]['url']
@@ -339,9 +342,11 @@ class Post:
         """List of all lowercased profiles that are mentioned in the Post's caption, without preceeding @."""
         if not self.caption:
             return []
-        # This regular expression is from jStassen, adjusted to use Python's \w to support Unicode
+        # This regular expression is modified from jStassen, adjusted to use Python's \w to
+        # support Unicode and a word/beginning of string delimiter at the beginning to ensure
+        # that no email addresses join the list of mentions.
         # http://blog.jstassen.com/2016/03/code-regex-for-instagram-username-and-hashtags/
-        mention_regex = re.compile(r"(?:@)(\w(?:(?:\w|(?:\.(?!\.))){0,28}(?:\w))?)")
+        mention_regex = re.compile(r"(?:^|\W|_)(?:@)(\w(?:(?:\w|(?:\.(?!\.))){0,28}(?:\w))?)")
         return re.findall(mention_regex, self.caption.lower())
 
     @property
@@ -372,13 +377,35 @@ class Post:
     def video_url(self) -> Optional[str]:
         """URL of the video, or None."""
         if self.is_video:
-            if self._context.is_logged_in:
+            version_urls = []
+            try:
+                version_urls.append(self._field('video_url'))
+            except (InstaloaderException, KeyError, IndexError) as err:
+                self._context.error(f"Warning: Unable to fetch video from graphql of {self}: {err}")
+            if self._context.iphone_support and self._context.is_logged_in:
                 try:
-                    url = self._iphone_struct['video_versions'][0]['url']
-                    return url
+                    version_urls.extend(version['url'] for version in self._iphone_struct['video_versions'])
                 except (InstaloaderException, KeyError, IndexError) as err:
-                    self._context.error('{} Unable to fetch high quality video version of {}.'.format(err, self))
-            return self._field('video_url')
+                    self._context.error(f"Unable to fetch high-quality video version of {self}: {err}")
+            version_urls = list(dict.fromkeys(version_urls))
+            if len(version_urls) == 0:
+                return None
+            if len(version_urls) == 1:
+                return version_urls[0]
+            url_candidates: List[Tuple[int, str]] = []
+            for idx, version_url in enumerate(version_urls):
+                try:
+                    url_candidates.append((
+                        int(self._context.head(version_url, allow_redirects=True).headers.get('Content-Length', 0)),
+                        version_url
+                    ))
+                except (InstaloaderException, KeyError, IndexError) as err:
+                    self._context.error(f"Video URL candidate {idx+1}/{len(version_urls)} for {self}: {err}")
+            if not url_candidates:
+                # All candidates fail: Fallback to default URL and handle errors later at the actual download attempt
+                return version_urls[0]
+            url_candidates.sort()
+            return url_candidates[-1][1]
         return None
 
     @property
@@ -551,10 +578,10 @@ class Post:
             return None
         location_id = int(loc['id'])
         if any(k not in loc for k in ('name', 'slug', 'has_public_page', 'lat', 'lng')):
-            loc = self._context.get_json("explore/locations/{0}/".format(location_id),
-                                         params={'__a': 1})['graphql']['location']
+            loc.update(self._context.get_json("explore/locations/{0}/".format(location_id),
+                                              params={'__a': 1})['native_location_data']['location_info'])
         self._location = PostLocation(location_id, loc['name'], loc['slug'], loc['has_public_page'],
-                                      loc['lat'], loc['lng'])
+                                      loc.get('lat'), loc.get('lng'))
         return self._location
 
 
@@ -691,6 +718,8 @@ class Profile:
 
     @property
     def _iphone_struct(self) -> Dict[str, Any]:
+        if not self._context.iphone_support:
+            raise IPhoneSupportDisabledException("iPhone support is disabled.")
         if not self._context.is_logged_in:
             raise LoginRequiredException("--login required to access iPhone profile info endpoint.")
         if not self._iphone_struct_:
@@ -791,14 +820,13 @@ class Profile:
     def has_public_story(self) -> bool:
         if not self._has_public_story:
             self._obtain_metadata()
-            # query not rate limited if invoked anonymously:
-            with self._context.anonymous_copy() as anonymous_context:
-                data = anonymous_context.graphql_query('9ca88e465c3f866a76f7adee3871bdd8',
-                                                       {'user_id': self.userid, 'include_chaining': False,
-                                                        'include_reel': False, 'include_suggested_users': False,
-                                                        'include_logged_out_extras': True,
-                                                        'include_highlight_reels': False},
-                                                       'https://www.instagram.com/{}/'.format(self.username))
+            # query rate might be limited:
+            data = self._context.graphql_query('9ca88e465c3f866a76f7adee3871bdd8',
+                                               {'user_id': self.userid, 'include_chaining': False,
+                                                'include_reel': False, 'include_suggested_users': False,
+                                                'include_logged_out_extras': True,
+                                                'include_highlight_reels': False},
+                                               'https://www.instagram.com/{}/'.format(self.username))
             self._has_public_story = data['data']['user']['has_public_story']
         assert self._has_public_story is not None
         return self._has_public_story
@@ -834,7 +862,7 @@ class Profile:
 
         .. versionchanged:: 4.2.1
            Require being logged in for HD version (as required by Instagram)."""
-        if self._context.is_logged_in:
+        if self._context.iphone_support and self._context.is_logged_in:
             try:
                 return self._iphone_struct['hd_profile_pic_url_info']['url']
             except (InstaloaderException, KeyError) as err:
@@ -1021,6 +1049,8 @@ class StoryItem:
 
     @property
     def _iphone_struct(self) -> Dict[str, Any]:
+        if not self._context.iphone_support:
+            raise IPhoneSupportDisabledException("iPhone support is disabled.")
         if not self._context.is_logged_in:
             raise LoginRequiredException("--login required to access iPhone media info endpoint.")
         if not self._iphone_struct_:
@@ -1079,7 +1109,7 @@ class StoryItem:
     @property
     def url(self) -> str:
         """URL of the picture / video thumbnail of the StoryItem"""
-        if self.typename == "GraphStoryImage" and self._context.is_logged_in:
+        if self.typename == "GraphStoryImage" and self._context.iphone_support and self._context.is_logged_in:
             try:
                 orig_url = self._iphone_struct['image_versions2']['candidates'][0]['url']
                 url = re.sub(r'([?&])se=\d+&?', r'\1', orig_url).rstrip('&')
@@ -1102,7 +1132,35 @@ class StoryItem:
     def video_url(self) -> Optional[str]:
         """URL of the video, or None."""
         if self.is_video:
-            return self._node['video_resources'][-1]['src']
+            version_urls = []
+            try:
+                version_urls.append(self._node['video_resources'][-1]['src'])
+            except (InstaloaderException, KeyError, IndexError) as err:
+                self._context.error(f"Warning: Unable to fetch video from graphql of {self}: {err}")
+            if self._context.iphone_support and self._context.is_logged_in:
+                try:
+                    version_urls.extend(version['url'] for version in self._iphone_struct['video_versions'])
+                except (InstaloaderException, KeyError, IndexError) as err:
+                    self._context.error(f"Unable to fetch high-quality video version of {self}: {err}")
+            version_urls = list(dict.fromkeys(version_urls))
+            if len(version_urls) == 0:
+                return None
+            if len(version_urls) == 1:
+                return version_urls[0]
+            url_candidates: List[Tuple[int, str]] = []
+            for idx, version_url in enumerate(version_urls):
+                try:
+                    url_candidates.append((
+                        int(self._context.head(version_url, allow_redirects=True).headers.get('Content-Length', 0)),
+                        version_url
+                    ))
+                except (InstaloaderException, KeyError, IndexError) as err:
+                    self._context.error(f"Video URL candidate {idx+1}/{len(version_urls)} for {self}: {err}")
+            if not url_candidates:
+                # All candidates fail: Fallback to default URL and handle errors later at the actual download attempt
+                return version_urls[0]
+            url_candidates.sort()
+            return url_candidates[-1][1]
         return None
 
 
@@ -1512,7 +1570,7 @@ class TopSearchResults:
             place = location.get('place', {})
             slug = place.get('slug')
             loc = place.get('location', {})
-            yield PostLocation(int(loc['pk']), loc['name'], slug, None, loc['lat'], loc['lng'])
+            yield PostLocation(int(loc['pk']), loc['name'], slug, None, loc.get('lat'), loc.get('lng'))
 
     def get_hashtag_strings(self) -> Iterator[str]:
         """
@@ -1542,7 +1600,67 @@ class TopSearchResults:
         return self._searchstring
 
 
+class TitlePic:
+    def __init__(self, profile: Optional[Profile], target: Union[str, Path], typename: str,
+                 filename: str, date_utc: Optional[datetime]):
+        self._profile = profile
+        self._target = target
+        self._typename = typename
+        self._filename = filename
+        self._date_utc = date_utc
+
+    @property
+    def profile(self) -> Union[str, Path]:
+        return self._profile.username.lower() if self._profile is not None else self._target
+
+    @property
+    def owner_username(self) -> Union[str, Path]:
+        return self.profile
+
+    @property
+    def owner_id(self) -> Union[str, Path]:
+        return str(self._profile.userid) if self._profile is not None else self._target
+
+    @property
+    def target(self) -> Union[str, Path]:
+        return self._target
+
+    @property
+    def typename(self) -> str:
+        return self._typename
+
+    @property
+    def filename(self) -> str:
+        return self._filename
+
+    @property
+    def date_utc(self) -> Optional[datetime]:
+        return self._date_utc
+
+    @property
+    def date(self) -> Optional[datetime]:
+        return self.date_utc
+
+    @property
+    def date_local(self) -> Optional[datetime]:
+        return self._date_utc.astimezone() if self._date_utc is not None else None
+
+
 JsonExportable = Union[Post, Profile, StoryItem, Hashtag, FrozenNodeIterator]
+
+
+def get_json_structure(structure: JsonExportable) -> dict:
+    """Returns Instaloader JSON structure for a :class:`Post`, :class:`Profile`, :class:`StoryItem`, :class:`Hashtag`
+     or :class:`FrozenNodeIterator` so that it can be loaded by :func:`load_structure`.
+
+    :param structure: :class:`Post`, :class:`Profile`, :class:`StoryItem` or :class:`Hashtag`
+
+    .. versionadded:: 4.8
+    """
+    return {
+        'node': structure._asdict(),
+        'instaloader': {'version': __version__, 'node_type': structure.__class__.__name__}
+    }
 
 
 def save_structure_to_file(structure: JsonExportable, filename: str) -> None:
@@ -1555,8 +1673,7 @@ def save_structure_to_file(structure: JsonExportable, filename: str) -> None:
     :param structure: :class:`Post`, :class:`Profile`, :class:`StoryItem` or :class:`Hashtag`
     :param filename: Filename, ends in '.json' or '.json.xz'
     """
-    json_structure = {'node': structure._asdict(),
-                      'instaloader': {'version': __version__, 'node_type': structure.__class__.__name__}}
+    json_structure = get_json_structure(structure)
     compress = filename.endswith('.xz')
     if compress:
         with lzma.open(filename, 'wt', check=lzma.CHECK_NONE) as fp:
@@ -1564,6 +1681,36 @@ def save_structure_to_file(structure: JsonExportable, filename: str) -> None:
     else:
         with open(filename, 'wt') as fp:
             json.dump(json_structure, fp=fp, indent=4, sort_keys=True)
+
+
+def load_structure(context: InstaloaderContext, json_structure: dict) -> JsonExportable:
+    """Loads a :class:`Post`, :class:`Profile`, :class:`StoryItem`, :class:`Hashtag` or :class:`FrozenNodeIterator` from
+    a json structure.
+
+    :param context: :attr:`Instaloader.context` linked to the new object, used for additional queries if neccessary.
+    :param json_structure: Instaloader JSON structure
+
+    .. versionadded:: 4.8
+    """
+    if 'node' in json_structure and 'instaloader' in json_structure and \
+            'node_type' in json_structure['instaloader']:
+        node_type = json_structure['instaloader']['node_type']
+        if node_type == "Post":
+            return Post(context, json_structure['node'])
+        elif node_type == "Profile":
+            return Profile(context, json_structure['node'])
+        elif node_type == "StoryItem":
+            return StoryItem(context, json_structure['node'])
+        elif node_type == "Hashtag":
+            return Hashtag(context, json_structure['node'])
+        elif node_type == "FrozenNodeIterator":
+            if not 'first_node' in json_structure['node']:
+                json_structure['node']['first_node'] = None
+            return FrozenNodeIterator(**json_structure['node'])
+    elif 'shortcode' in json_structure:
+        # Post JSON created with Instaloader v3
+        return Post.from_shortcode(context, json_structure['shortcode'])
+    raise InvalidArgumentException("Passed json structure is not an Instaloader JSON")
 
 
 def load_structure_from_file(context: InstaloaderContext, filename: str) -> JsonExportable:
@@ -1580,23 +1727,4 @@ def load_structure_from_file(context: InstaloaderContext, filename: str) -> Json
         fp = open(filename, 'rt')
     json_structure = json.load(fp)
     fp.close()
-    if 'node' in json_structure and 'instaloader' in json_structure and \
-            'node_type' in json_structure['instaloader']:
-        node_type = json_structure['instaloader']['node_type']
-        if node_type == "Post":
-            return Post(context, json_structure['node'])
-        elif node_type == "Profile":
-            return Profile(context, json_structure['node'])
-        elif node_type == "StoryItem":
-            return StoryItem(context, json_structure['node'])
-        elif node_type == "Hashtag":
-            return Hashtag(context, json_structure['node'])
-        elif node_type == "FrozenNodeIterator":
-            return FrozenNodeIterator(**json_structure['node'])
-        else:
-            raise InvalidArgumentException("{}: Not an Instaloader JSON.".format(filename))
-    elif 'shortcode' in json_structure:
-        # Post JSON created with Instaloader v3
-        return Post.from_shortcode(context, json_structure['shortcode'])
-    else:
-        raise InvalidArgumentException("{}: Not an Instaloader JSON.".format(filename))
+    return load_structure(context, json_structure)

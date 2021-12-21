@@ -54,7 +54,8 @@ class InstaloaderContext:
     def __init__(self, sleep: bool = True, quiet: bool = False, user_agent: Optional[str] = None,
                  max_connection_attempts: int = 3, request_timeout: float = 300.0,
                  rate_controller: Optional[Callable[["InstaloaderContext"], "RateController"]] = None,
-                 fatal_status_codes: Optional[List[int]] = None):
+                 fatal_status_codes: Optional[List[int]] = None,
+                 iphone_support: bool = True):
 
         self.user_agent = user_agent if user_agent is not None else default_user_agent()
         self.request_timeout = request_timeout
@@ -66,6 +67,7 @@ class InstaloaderContext:
         self._graphql_page_length = 50
         self._root_rhx_gis = None
         self.two_factor_auth_pending = None
+        self.iphone_support = iphone_support
 
         # error log, filled with error() and printed at the end of Instaloader.main()
         self.error_log = []                      # type: List[str]
@@ -152,7 +154,6 @@ class InstaloaderContext:
         if empty_session_only:
             del header['Host']
             del header['Origin']
-            del header['Referer']
             del header['X-Instagram-AJAX']
             del header['X-Requested-With']
         return header
@@ -210,8 +211,8 @@ class InstaloaderContext:
         # Override default timeout behavior.
         # Need to silence mypy bug for this. See: https://github.com/python/mypy/issues/2427
         session.request = partial(session.request, timeout=self.request_timeout) # type: ignore
-        session.get('https://www.instagram.com/web/__mid/')
-        csrf_token = session.cookies.get_dict()['csrftoken']
+        csrf_json = self.get_json('accounts/login/', {}, session=session)
+        csrf_token = csrf_json['config']['csrf_token']
         session.headers.update({'X-CSRFToken': csrf_token})
         # Not using self.get_json() here, because we need to access csrftoken cookie
         self.do_sleep()
@@ -283,9 +284,9 @@ class InstaloaderContext:
         resp_json = login.json()
         if resp_json['status'] != 'ok':
             if 'message' in resp_json:
-                raise BadCredentialsException("Login error: {}".format(resp_json['message']))
+                raise BadCredentialsException("2FA error: {}".format(resp_json['message']))
             else:
-                raise BadCredentialsException("Login error: \"{}\" status.".format(resp_json['status']))
+                raise BadCredentialsException("2FA error: \"{}\" status.".format(resp_json['status']))
         session.headers.update({'X-CSRFToken': login.cookies['csrftoken']})
         self._session = session
         self.username = user
@@ -527,6 +528,28 @@ class InstaloaderContext:
         :raises QueryReturnedForbiddenException: When the server responds with a 403.
         :raises ConnectionException: When download repeatedly failed."""
         self.write_raw(self.get_raw(url), filename)
+
+    def head(self, url: str, allow_redirects: bool = False) -> requests.Response:
+        """HEAD a URL anonymously.
+
+        :raises QueryReturnedNotFoundException: When the server responds with a 404.
+        :raises QueryReturnedForbiddenException: When the server responds with a 403.
+        :raises ConnectionException: When request failed.
+
+        .. versionadded:: 4.7.6
+        """
+        with self.get_anonymous_session() as anonymous_session:
+            resp = anonymous_session.head(url, allow_redirects=allow_redirects)
+        if resp.status_code == 200:
+            return resp
+        else:
+            if resp.status_code == 403:
+                # suspected invalid URL signature
+                raise QueryReturnedForbiddenException("403 when accessing {}.".format(url))
+            if resp.status_code == 404:
+                # 404 not worth retrying.
+                raise QueryReturnedNotFoundException("404 when accessing {}.".format(url))
+            raise ConnectionException("HTTP error code {}.".format(resp.status_code))
 
     @property
     def root_rhx_gis(self) -> Optional[str]:

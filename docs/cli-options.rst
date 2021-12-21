@@ -100,7 +100,6 @@ What to Download of each Post
 
    Do not xz compress JSON files, rather create pretty formatted JSONs.
 
-
 What to Download of each Profile
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -147,6 +146,23 @@ Which Posts to Download
    This flag is recommended when you use Instaloader to update your personal
    Instagram archive.
 
+.. option:: --latest-stamps [STAMPSFILE]
+
+   Works similarly to :option:`--fast-update`, but instead of relying on already
+   downloaded media, the time each profile was downloaded is stored, and only
+   media newer than the last download is fetched. This allows updating your
+   personal Instagram archive while emptying the target directories.
+
+   Only works for media associated with a specific profile, and that is returned
+   in chronological order: profile posts, profile stories, profile IGTV posts
+   and profile tagged posts.
+
+   By default, the information is stored in
+   ``~/.config/instaloader/latest-stamps.ini``, but you can specify an
+   alternative location.
+
+   .. versionadded:: 4.8
+
 .. option:: --post-filter filter, --only-if filter
 
    Expression that, if given, must evaluate to True for each post to be
@@ -164,8 +180,8 @@ Which Posts to Download
 
 .. option:: --count COUNT, -c
 
-   Do not attempt to download more than COUNT posts.  Applies only to
-   ``#hashtag``, ``%location id``, and ``:feed``.
+   Do not attempt to download more than COUNT posts.  Applies to
+   ``#hashtag``, ``%location_id``, ``:feed``, and ``:saved``.
 
 
 Login (Download Private Profiles)
@@ -206,11 +222,22 @@ How to Download
 
 .. option:: --filename-pattern FILENAME_PATTERN
 
-   Prefix of filenames, relative to the directory given with
+   Prefix of filenames for posts and stories, relative to the directory given with
    :option:`--dirname-pattern`. ``{profile}`` is replaced by the profile name,
    ``{target}`` is replaced by the target you specified, i.e.  either ``:feed``,
    ``#hashtag`` or the profile name. Defaults to ``{date_utc}_UTC``.
    See :ref:`filename-specification` for a list of supported tokens.
+
+.. option:: --title-pattern TITLE_PATTERN
+
+   Prefix of filenames for profile pics, hashtag profile pics, and highlight
+   covers, relative to the directory given with :option:`--dirname-pattern`.
+   Defaults to ``{date_utc}_UTC_{typename}`` if :option:`--dirname-pattern`
+   contains ``{target}`` or ``{profile}``, otherwise defaults to
+   ``{target}_{date_utc}_UTC_{typename}``.
+   See :ref:`filename-specification` for a list of supported tokens.
+
+   .. versionadded:: 4.8
 
 .. option:: --resume-prefix prefix
 
@@ -273,6 +300,12 @@ How to Download
    Requests error.
 
    .. versionadded:: 4.7
+
+.. option:: --no-iphone
+
+   Do not attempt to download iPhone version of images and videos.
+
+   .. versionadded:: 4.8
 
 Miscellaneous Options
 ^^^^^^^^^^^^^^^^^^^^^
