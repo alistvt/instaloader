@@ -146,6 +146,10 @@ class _PostPathFormatter(_ArbitraryItemFormatter):
     def sanitize_path(ret: str) -> str:
         """Replaces '/' with similar looking Division Slash and some other illegal filename characters on Windows."""
         ret = ret.replace('/', '\u2215')
+
+        if ret.startswith('.'):
+            ret = ret.replace('.', '\u2024', 1)
+
         if platform.system() == 'Windows':
             ret = ret.replace(':', '\uff1a').replace('<', '\ufe64').replace('>', '\ufe65').replace('\"', '\uff02')
             ret = ret.replace('\\', '\ufe68').replace('|', '\uff5c').replace('?', '\ufe16').replace('*', '\uff0a')
@@ -182,6 +186,13 @@ class Instaloader:
     :param slide: :option:`--slide`
     :param fatal_status_codes: :option:`--abort-on`
     :param iphone_support: not :option:`--no-iphone`
+    :param proxies: A dictionary containing proxy URLs in the format accepted by
+        requests library.
+        If set to None, Instaloader will use the proxy configuration defined by standard
+        environment variables http_proxy, https_proxy, no_proxy and curl_ca_bundle
+        (uppercase variants of these variables are also supported).
+        For the detailed description of the format, see
+        https://docs.python-requests.org/en/master/user/advanced/#proxies
 
     .. attribute:: context
 
@@ -211,11 +222,12 @@ class Instaloader:
                  slide: Optional[str] = None,
                  fatal_status_codes: Optional[List[int]] = None,
                  iphone_support: bool = True,
-                 title_pattern: Optional[str] = None):
+                 title_pattern: Optional[str] = None,
+                 proxies: Optional[dict] = None):
 
         self.context = InstaloaderContext(sleep, quiet, user_agent, max_connection_attempts,
                                           request_timeout, rate_controller, fatal_status_codes,
-                                          iphone_support)
+                                          iphone_support, proxies)
 
         # configuration parameters
         self.dirname_pattern = dirname_pattern or "{target}"
@@ -453,12 +465,9 @@ class Instaloader:
     def save_location(self, filename: str, location: PostLocation, mtime: datetime) -> None:
         """Save post location name and Google Maps link."""
         filename += '_location.txt'
-        if location.lat is not None and location.lng is not None:
-            location_string = (location.name + "\n" +
-                               "https://maps.google.com/maps?q={0},{1}&ll={0},{1}\n".format(location.lat,
-                                                                                            location.lng))
-        else:
-            location_string = location.name
+        location_string = (location.name + "\n" +
+                           "https://maps.google.com/maps?q={0},{1}&ll={0},{1}\n".format(location.lat,
+                                                                                        location.lng))
         with open(filename, 'wb') as text_file:
             with BytesIO(location_string.encode()) as bio:
                 shutil.copyfileobj(cast(IO, bio), text_file)
