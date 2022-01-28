@@ -35,8 +35,8 @@ PostLocation.id.__doc__ = "ID number of location."
 PostLocation.name.__doc__ = "Location name."
 PostLocation.slug.__doc__ = "URL friendly variant of location name."
 PostLocation.has_public_page.__doc__ = "Whether location has a public page."
-PostLocation.lat.__doc__ = "Latitude (:class:`float` or None)."
-PostLocation.lng.__doc__ = "Longitude (:class:`float` or None)."
+PostLocation.lat.__doc__ = "Latitude (:class:`float`)."
+PostLocation.lng.__doc__ = "Longitude (:class:`float`)."
 
 
 class Post:
@@ -377,23 +377,20 @@ class Post:
     def video_url(self) -> Optional[str]:
         """URL of the video, or None."""
         if self.is_video:
-            version_urls = []
-            try:
-                version_urls.append(self._field('video_url'))
-            except (InstaloaderException, KeyError, IndexError) as err:
-                self._context.error(f"Warning: Unable to fetch video from graphql of {self}: {err}")
+            version_urls = [self._field('video_url')]
             if self._context.iphone_support and self._context.is_logged_in:
                 try:
                     version_urls.extend(version['url'] for version in self._iphone_struct['video_versions'])
                 except (InstaloaderException, KeyError, IndexError) as err:
                     self._context.error(f"Unable to fetch high-quality video version of {self}: {err}")
-            version_urls = list(dict.fromkeys(version_urls))
-            if len(version_urls) == 0:
-                return None
-            if len(version_urls) == 1:
+                    return version_urls[0]
+            else:
                 return version_urls[0]
             url_candidates: List[Tuple[int, str]] = []
             for idx, version_url in enumerate(version_urls):
+                if any(url_candidate[1] == version_url for url_candidate in url_candidates):
+                    # Skip duplicates
+                    continue
                 try:
                     url_candidates.append((
                         int(self._context.head(version_url, allow_redirects=True).headers.get('Content-Length', 0)),
@@ -581,7 +578,7 @@ class Post:
             loc.update(self._context.get_json("explore/locations/{0}/".format(location_id),
                                               params={'__a': 1})['native_location_data']['location_info'])
         self._location = PostLocation(location_id, loc['name'], loc['slug'], loc['has_public_page'],
-                                      loc.get('lat'), loc.get('lng'))
+                                      loc['lat'], loc['lng'])
         return self._location
 
 
@@ -1132,23 +1129,20 @@ class StoryItem:
     def video_url(self) -> Optional[str]:
         """URL of the video, or None."""
         if self.is_video:
-            version_urls = []
-            try:
-                version_urls.append(self._node['video_resources'][-1]['src'])
-            except (InstaloaderException, KeyError, IndexError) as err:
-                self._context.error(f"Warning: Unable to fetch video from graphql of {self}: {err}")
+            version_urls = [self._node['video_resources'][-1]['src']]
             if self._context.iphone_support and self._context.is_logged_in:
                 try:
                     version_urls.extend(version['url'] for version in self._iphone_struct['video_versions'])
                 except (InstaloaderException, KeyError, IndexError) as err:
                     self._context.error(f"Unable to fetch high-quality video version of {self}: {err}")
-            version_urls = list(dict.fromkeys(version_urls))
-            if len(version_urls) == 0:
-                return None
-            if len(version_urls) == 1:
+                    return version_urls[0]
+            else:
                 return version_urls[0]
             url_candidates: List[Tuple[int, str]] = []
             for idx, version_url in enumerate(version_urls):
+                if any(url_candidate[1] == version_url for url_candidate in url_candidates):
+                    # Skip duplicates
+                    continue
                 try:
                     url_candidates.append((
                         int(self._context.head(version_url, allow_redirects=True).headers.get('Content-Length', 0)),
@@ -1559,7 +1553,7 @@ class TopSearchResults:
             place = location.get('place', {})
             slug = place.get('slug')
             loc = place.get('location', {})
-            yield PostLocation(int(loc['pk']), loc['name'], slug, None, loc.get('lat'), loc.get('lng'))
+            yield PostLocation(int(loc['pk']), loc['name'], slug, None, loc['lat'], loc['lng'])
 
     def get_hashtag_strings(self) -> Iterator[str]:
         """
@@ -1713,6 +1707,7 @@ def load_structure_from_file(context: InstaloaderContext, filename: str) -> Json
     if compressed:
         fp = lzma.open(filename, 'rt')
     else:
+        # pylint:disable=consider-using-with
         fp = open(filename, 'rt')
     json_structure = json.load(fp)
     fp.close()
