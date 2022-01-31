@@ -224,7 +224,7 @@ class Instaloader:
                  iphone_support: bool = True,
                  title_pattern: Optional[str] = None,
                  proxies: Optional[dict] = None):
-
+        self.available_from = datetime.now()
         self.context = InstaloaderContext(sleep, quiet, user_agent, max_connection_attempts,
                                           request_timeout, rate_controller, fatal_status_codes,
                                           iphone_support, proxies)
